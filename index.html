@@ -513,6 +513,7 @@ window.toggleCita = function(key,id){
   saveCitas(); renderDay(); renderDashboard();
 };
 window.deleteCita = function(key,id){
+  cancelNotification(id);
   citas[key] = (citas[key]||[]).filter(x=>x.id!==id);
   saveCitas(); renderDay(); renderDashboard();
 };
@@ -528,6 +529,9 @@ window.addCita = function(){
   });
   citas[key].sort((a,b)=>(a.hora||"99:99").localeCompare(b.hora||"99:99"));
   saveCitas();
+  // Programar notificación 24h antes
+  const nuevaCita = citas[key].find(c=>c.texto===texto && c.hora===hora && c.addedBy===currentUser);
+  if(nuevaCita) scheduleNotification(nuevaCita, key);
   document.getElementById("new-cita-input").value="";
   document.getElementById("new-hora-input").value="";
   renderDay(); renderDashboard();
@@ -539,11 +543,98 @@ window.setForUser = function(u){
   });
 };
 
+// ── Notificaciones ─────────────────────────────────────────────────────────
+const NOTIF_KEY = "medcal-notifs";
+
+function getScheduledNotifs(){
+  try{ return JSON.parse(localStorage.getItem(NOTIF_KEY)||"{}"); } catch{ return {}; }
+}
+function saveScheduledNotifs(obj){
+  localStorage.setItem(NOTIF_KEY, JSON.stringify(obj));
+}
+
+async function requestNotifPermission(){
+  if(!("Notification" in window)) return false;
+  if(Notification.permission === "granted") return true;
+  if(Notification.permission === "denied") return false;
+  const result = await Notification.requestPermission();
+  return result === "granted";
+}
+
+function scheduleNotification(cita, dateKey){
+  if(!("Notification" in window)) return;
+  if(Notification.permission !== "granted") return;
+
+  // dateKey = "YYYY-MM-DD", cita.hora = "HH:MM" or ""
+  const [y,m,d] = dateKey.split("-").map(Number);
+  let citaTime;
+  if(cita.hora){
+    const [h,min] = cita.hora.split(":").map(Number);
+    citaTime = new Date(y, m-1, d, h, min, 0).getTime();
+  } else {
+    citaTime = new Date(y, m-1, d, 9, 0, 0).getTime(); // default 9:00
+  }
+
+  const notifTime = citaTime - 24*60*60*1000; // 24h before
+  const now = Date.now();
+  if(notifTime <= now) return; // already passed
+
+  const delay = notifTime - now;
+  const notifId = cita.id;
+
+  // Cancel existing timeout for this cita if any
+  const scheduled = getScheduledNotifs();
+  if(scheduled[notifId]){
+    clearTimeout(scheduled[notifId].timeoutId);
+  }
+
+  const timeoutId = setTimeout(()=>{
+    new Notification("🏥 Cita mañana", {
+      body: `${cita.texto}${cita.hora ? " a las "+cita.hora+"h" : ""} (${cita.forUser})`,
+      icon: document.querySelector("link[rel='apple-touch-icon']").href,
+      badge: document.querySelector("link[rel='apple-touch-icon']").href,
+    });
+    // Remove from scheduled after firing
+    const s = getScheduledNotifs();
+    delete s[notifId];
+    saveScheduledNotifs(s);
+  }, delay);
+
+  scheduled[notifId] = { timeoutId, notifTime, texto: cita.texto };
+  saveScheduledNotifs(scheduled);
+}
+
+function cancelNotification(citaId){
+  const scheduled = getScheduledNotifs();
+  if(scheduled[citaId]){
+    clearTimeout(scheduled[citaId].timeoutId);
+    delete scheduled[citaId];
+    saveScheduledNotifs(scheduled);
+  }
+}
+
+// Re-schedule all future notifications on app load
+function restoreNotifications(){
+  if(Notification.permission !== "granted") return;
+  const now = Date.now();
+  Object.entries(citas).forEach(([key, arr])=>{
+    (arr||[]).forEach(c=>{
+      if(!c.done) scheduleNotification(c, key);
+    });
+  });
+}
+
 // ── Utilidad ───────────────────────────────────────────────────────────────
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
 // ── Inicio ─────────────────────────────────────────────────────────────────
 goTo("dashboard");
+
+// Pedir permiso de notificaciones al arrancar
+(async ()=>{
+  const granted = await requestNotifPermission();
+  if(granted) restoreNotifications();
+})();
 </script>
 </body>
 </html>
